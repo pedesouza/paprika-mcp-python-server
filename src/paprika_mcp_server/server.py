@@ -13,7 +13,7 @@ from paprika_mcp_server.config import get_config
 from paprika_mcp_server.image_generator import ImageGenerator
 from paprika_mcp_server.paprika_client import PaprikaClient, ValidationError
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Initialize server
@@ -532,6 +532,25 @@ async def main():
                         },
                         "required": ["menu_uid", "name"],
                     },
+                ),
+                Tool(
+                    name="update_menu",
+                    description="Update a Menu's name, notes, order_flag or days by uid. WRITES to your live account.",
+                    inputSchema={"type": "object", "properties": {
+                        "uid": {"type": "string"}, "name": {"type": "string"}, "notes": {"type": "string"},
+                        "order_flag": {"type": "integer"}, "days": {"type": "integer"}}, "required": ["uid"]},
+                ),
+                Tool(
+                    name="update_menu_item",
+                    description="Update a menu item's name, day, order_flag or recipe_uid by uid. WRITES to your live account.",
+                    inputSchema={"type": "object", "properties": {
+                        "uid": {"type": "string"}, "name": {"type": "string"}, "day": {"type": "integer"},
+                        "order_flag": {"type": "integer"}, "recipe_uid": {"type": "string"}}, "required": ["uid"]},
+                ),
+                Tool(
+                    name="delete_menu_item",
+                    description="Delete a menu item by uid. WRITES to your live account.",
+                    inputSchema={"type": "object", "properties": {"uid": {"type": "string"}}, "required": ["uid"]},
                 ),
                 Tool(
                     name="list_pantry",
@@ -1157,6 +1176,18 @@ async def main():
                         order_flag=arguments.get("order_flag", 0),
                     )
                     return [TextContent(type="text", text=f"Added '{item['name']}' to menu {item['menu_uid']} on day {item['day']} (uid {item['uid']}).")]
+
+                elif name == "update_menu":
+                    m = await paprika_client.update_menu(arguments["uid"], arguments.get("name"), arguments.get("notes"), arguments.get("order_flag"), arguments.get("days"))
+                    return [TextContent(type="text", text=f"Updated menu '{m['name']}' (order_flag {m.get('order_flag')}).")]
+
+                elif name == "update_menu_item":
+                    it = await paprika_client.update_menu_item(arguments["uid"], arguments.get("name"), arguments.get("day"), arguments.get("order_flag"), arguments.get("recipe_uid"))
+                    return [TextContent(type="text", text=f"Updated menu item '{it['name']}' (day {it.get('day')}).")]
+
+                elif name == "delete_menu_item":
+                    it = await paprika_client.delete_menu_item(arguments["uid"])
+                    return [TextContent(type="text", text=f"Deleted menu item '{it['name']}'. Verify with list_menu_items.")]
 
                 elif name == "list_pantry":
                     items = await paprika_client.get_pantry()

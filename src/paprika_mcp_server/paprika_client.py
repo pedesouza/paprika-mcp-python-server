@@ -1107,9 +1107,7 @@ class PaprikaClient:
             "is_ingredient": False,
         }
         meal["hash"] = self._calculate_hash(meal)
-        data = aiohttp.FormData()
-        data.add_field("data", self._gzip_json([meal]), content_type="application/octet-stream")
-        await self._make_authenticated_request("POST", "/sync/meals/", data=data)
+        await self._post_sync("meals", [meal])
         logger.info(f"Scheduled meal '{name}' on {date}")
         return meal
 
@@ -1124,9 +1122,7 @@ class PaprikaClient:
             "days": days,
         }
         menu["hash"] = self._calculate_hash(menu)
-        data = aiohttp.FormData()
-        data.add_field("data", self._gzip_json([menu]), content_type="application/octet-stream")
-        await self._make_authenticated_request("POST", "/sync/menus/", data=data)
+        await self._post_sync("menus", [menu])
         logger.info(f"Created menu '{name}'")
         return menu
 
@@ -1147,11 +1143,59 @@ class PaprikaClient:
             "is_ingredient": False,
         }
         item["hash"] = self._calculate_hash(item)
-        data = aiohttp.FormData()
-        data.add_field("data", self._gzip_json([item]), content_type="application/octet-stream")
-        await self._make_authenticated_request("POST", "/sync/menuitems/", data=data)
+        await self._post_sync("menuitems", [item])
         logger.info(f"Added menu item '{name}' to menu {menu_uid}")
         return item
+
+    # ---- sync write helper: fresh FormData per attempt, hard timeout, retries ----
+    _WRITE_TIMEOUT = 20
+    _WRITE_ATTEMPTS = 3
+
+    async def _post_sync(self, entity: str, objs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        import asyncio, time
+        payload = self._gzip_json(objs)
+        last = None
+        for attempt in range(1, self._WRITE_ATTEMPTS + 1):
+            data = aiohttp.FormData()
+            data.add_field("data", payload, content_type="application/octet-stream")
+            t0 = time.monotonic()
+            logger.info(f"POST /sync/{entity}/ attempt {attempt} ({len(objs)} obj)")
+            try:
+                r = await asyncio.wait_for(
+                    self._make_authenticated_request("POST", f"/sync/{entity}/", data=data),
+                    timeout=self._WRITE_TIMEOUT,
+                )
+                logger.info(f"POST /sync/{entity}/ ok in {time.monotonic()-t0:.1f}s")
+                return r
+            except (asyncio.TimeoutError, PaprikaAPIError, RuntimeError) as e:
+                last = e
+                logger.warning(f"POST /sync/{entity}/ failed in {time.monotonic()-t0:.1f}s: {e!r}")
+                if self.session and not self.session.closed:
+                    await self.session.close()   # drop possibly-stuck pooled connection
+                self.session = None
+                await asyncio.sleep(2 ** attempt)
+        raise PaprikaAPIError(f"Write to {entity} failed after {self._WRITE_ATTEMPTS} attempts: {last!r}")
+
+    async def _upsert(self, entity: str, uid: str, changes: Dict[str, Any]) -> Dict[str, Any]:
+        items = await self._get_sync_entity(entity)
+        obj = next((o for o in items if o.get("uid") == uid), None)
+        if obj is None:
+            raise PaprikaAPIError(f"No {entity} object with uid {uid}")
+        obj = {k: v for k, v in obj.items() if k != "hash"}
+        obj.update({k: v for k, v in changes.items() if v is not None})
+        obj["hash"] = self._calculate_hash(obj)
+        await self._post_sync(entity, [obj])
+        return obj
+
+    async def update_menu(self, uid: str, name=None, notes=None, order_flag=None, days=None):
+        return await self._upsert("menus", uid, {"name": name, "notes": notes, "order_flag": order_flag, "days": days})
+
+    async def update_menu_item(self, uid: str, name=None, day=None, order_flag=None, recipe_uid=None):
+        return await self._upsert("menuitems", uid, {"name": name, "day": day, "order_flag": order_flag, "recipe_uid": recipe_uid})
+
+    async def delete_menu_item(self, uid: str):
+        # UNVERIFIED: assumes Paprika sync honours a "deleted" flag. Test on a throwaway item first.
+        return await self._upsert("menuitems", uid, {"deleted": True})
 
     async def get_pantry(self) -> List[Dict[str, Any]]:
         """Return pantry items (what the household has on hand)."""
